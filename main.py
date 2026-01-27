@@ -15,10 +15,17 @@ PAGE_URL=f'{BASE_URL}/trading-and-data/'
 
 
 
-def get_yesterday_date():
+def get_previous_trading_date():
     #Calculate yesterday's date in appropriate format
-    yesterday = datetime.now() - timedelta(days=1)
-    return yesterday
+    today = datetime.now().date()
+    if today.weekday() == 0:  # Monday
+        previous_trading_day = today - timedelta(days=3)
+    elif today.weekday() >=5:  # Weekend
+        previous_trading_day = today - timedelta(days=today.weekday() - 4)
+    else:
+        previous_trading_day = today - timedelta(days=1)
+    return previous_trading_day
+
 
 
 def wait_for_table_update(driver, table, target_date, timeout=25):
@@ -79,16 +86,26 @@ def save_data_to_excel(data, column_names, yesterday):
 
 
 def main():
-    yesterday = get_yesterday_date().strftime('%d/%m/%Y')
     driver=start_driver()
     if driver:
         wait = WebDriverWait(driver, 30)
         try:
             driver.get(PAGE_URL)
-            table = get_table(driver,yesterday)
-            wait_for_table_update(driver, table, yesterday)
-            data, column_names = extract_table_data(table)
-            save_data_to_excel(data, column_names, yesterday)
+            while True:
+                yesterday = get_previous_trading_date().strftime('%d/%m/%Y')
+                table = get_table(driver,yesterday)
+                wait_for_table_update(driver, table, yesterday)
+                data, column_names = extract_table_data(table)
+
+                # Check if data is available for the date
+                if len(data) > 0:
+                    save_data_to_excel(data, column_names, yesterday)
+                    break
+                else:
+                    print(f'No data found for {yesterday}. Retrying...')
+                    # Decrement the date by one day and retry
+                    yesterday -= timedelta(days=1)
+    
         finally:
             driver.quit()
         
