@@ -5,7 +5,9 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.wait import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.select import Select
+from selenium.common.exceptions import StaleElementReferenceException
 import os
 
 
@@ -28,8 +30,17 @@ def get_previous_trading_date():
 
 
 
-def wait_for_table_update(driver, table, target_date, timeout=25):
-    WebDriverWait(driver, timeout).until(lambda d: target_date in table.text)
+def wait_for_table_update(driver, target_date, timeout=25):
+    """Re-find the table on each poll — DataTables replaces the DOM after filter changes."""
+    def table_contains_date(d):
+        try:
+            table = d.find_element(By.ID, "table_1")
+            return target_date in table.text
+        except StaleElementReferenceException:
+            return False
+
+    WebDriverWait(driver, timeout).until(table_contains_date)
+    return driver.find_element(By.ID, "table_1")
 
 
 def start_driver():
@@ -38,30 +49,35 @@ def start_driver():
 
 
 
-def get_table(driver,yesterday):
-    # get scrapped table after setting filter inputs
-    get_from_date_input = driver.find_element(by=By.ID, value="table_1_range_from_1")
-    get_to_date_input = driver.find_element(by=By.ID, value="table_1_range_to_1")
-    get_show_length = driver.find_element(by=By.NAME, value="table_1_length")
-    select = Select(get_show_length)
-    get_to_date_input.send_keys(yesterday)
-    get_from_date_input.send_keys(yesterday)
-    select.select_by_visible_text('All')
-    return  driver.find_element(by=By.ID, value="table_1")
+def get_table(driver, yesterday):
+    wait = WebDriverWait(driver, 10)
+    from_input = wait.until(EC.presence_of_element_located((By.ID, "table_1_range_from_1")))
+    to_input = driver.find_element(By.ID, "table_1_range_to_1")
+    show_length = driver.find_element(By.NAME, "table_1_length")
 
-def extract_table_data(table):
-    headers = table.find_elements(by=By.TAG_NAME, value="th")
-    column_names = [header.text for header in headers if header.text]
+    for inp in (from_input, to_input):
+        inp.clear()
+        inp.send_keys(yesterday)
 
-    # Extract row data
-    rows = table.find_elements(by=By.TAG_NAME, value="tr")
-    data = []
-    for row in rows:
-        cells = row.find_elements(by=By.TAG_NAME, value="td")
-        if cells:
-            row_data = [cell.text for cell in cells]
-            data.append(row_data)
-    return [data, column_names]
+    Select(show_length).select_by_visible_text("All")
+    return wait_for_table_update(driver, yesterday)
+
+def extract_table_data(driver, table):
+    for _ in range(3):
+        try:
+            headers = table.find_elements(by=By.TAG_NAME, value="th")
+            column_names = [header.text for header in headers if header.text]
+
+            rows = table.find_elements(by=By.TAG_NAME, value="tr")
+            data = []
+            for row in rows:
+                cells = row.find_elements(by=By.TAG_NAME, value="td")
+                if cells:
+                    data.append([cell.text for cell in cells])
+            return data, column_names
+        except StaleElementReferenceException:
+            table = driver.find_element(By.ID, "table_1")
+    raise StaleElementReferenceException("table_1 became stale while reading rows")
 
 def save_data_to_excel(data, column_names, yesterday):
     filename = '/Users/mac/Desktop/data/gse_trading_data_latest.xlsx'
@@ -88,23 +104,20 @@ def save_data_to_excel(data, column_names, yesterday):
 def main():
     driver=start_driver()
     if driver:
-        wait = WebDriverWait(driver, 30)
         try:
             driver.get(PAGE_URL)
+            target_date = get_previous_trading_date()
             while True:
-                yesterday = get_previous_trading_date().strftime('%d/%m/%Y')
-                table = get_table(driver,yesterday)
-                wait_for_table_update(driver, table, yesterday)
-                data, column_names = extract_table_data(table)
+                yesterday = target_date.strftime('%d/%m/%Y')
+                table = get_table(driver, yesterday)
+                data, column_names = extract_table_data(driver, table)
 
-                # Check if data is available for the date
                 if len(data) > 0:
                     save_data_to_excel(data, column_names, yesterday)
                     break
-                else:
-                    print(f'No data found for {yesterday}. Retrying...')
-                    # Decrement the date by one day and retry
-                    yesterday -= timedelta(days=1)
+
+                print(f'No data found for {yesterday}. Retrying...')
+                target_date -= timedelta(days=1)
     
         finally:
             driver.quit()
